@@ -1,0 +1,175 @@
+# -*- coding: utf-8 -*-
+"""
+Created on Wed Feb 16 11:28:10 2022
+
+@author: 19105
+"""
+
+#用户价值评价流程
+#熵权-TOPSIS算法
+import pandas as pd
+import numpy as np
+from datetime import datetime
+from dateutil.relativedelta import relativede
+
+
+def strplace(x):
+    return x.replace('\r','')
+
+
+def todatetime(x):
+    return datetime.strptime(x,'%y-%b')
+
+
+def times2days(x):
+    #把时间转换为距离下个月15号的天数
+     x = x.to_pydatetime()
+     t = x + relativedelta(months=+1)
+     y = (datetime(t.year,t.month,15) - x).days
+     return y
+ 
+
+def dataDirection_1(datas, offset=0):
+	def normalization(data):
+		return 1 / (data + offset)
+
+	return list(map(normalization, datas))
+
+
+def entropyWeight(data):
+	data = np.array(data)
+	# 归一化
+	P = data / data.sum(axis=0)
+
+	# 计算熵值
+	E = np.nansum(-P * np.log(P) / np.log(len(data)), axis=0)
+
+	# 计算权系数
+	return (1 - E) / (1 - E).sum()
+
+
+def topsis(data, weight=None):
+	# 归一化
+	data = data / np.sqrt((data ** 2).sum())
+
+	# 最优最劣方案
+	Z = pd.DataFrame([data.min(), data.max()], index=['负理想解', '正理想解'])
+
+	# 距离
+	weight = entropyWeight(data) if weight is None else np.array(weight)
+	Result = data.copy()
+	Result['正理想解'] = np.sqrt(((data - Z.loc['正理想解']) ** 2 * weight).sum(axis=1))
+	Result['负理想解'] = np.sqrt(((data - Z.loc['负理想解']) ** 2 * weight).sum(axis=1))
+
+	# 综合得分指数
+	Result['综合得分指数'] = Result['负理想解'] / (Result['负理想解'] + Result['正理想解'])
+	Result['排序'] = Result.rank(ascending=False)['综合得分指数']
+
+	return Result, Z
+
+
+
+df = pd.read_csv('Merge_test/output0216_customerlabel.csv',
+                 parse_dates=['recentday'], encoding='gbk')
+df['交易日期'] = df['交易日期'].apply(todatetime)
+df['特征日期'] = df['特征日期'].apply(todatetime)
+df['order_month'] = df['交易日期'].dt.month
+df['Country'] = df['Country'].apply(strplace)
+df['recentday'] = df['recentday'].apply(times2days)
+df = df.drop(['交易日期', '特征日期'],axis=1) #删去没有用的列，交易日期', '特征日期'
+print(df[0:5])
+
+df['sale_freq']=df['ord_cnt']/df['mon_cnt']
+df['fugou_rate']=df['fugou_stock_wide']/df['stock_wide']
+df['tuihuo_rate']=df['tuihuo_ord_cnt']/df['ord_cnt']
+df.columns
+
+df = df[['CustomerID', 'Country','order_month', 'sale_amt', 
+         'stock_wide','sale_freq', 'fugou_rate', 'tuihuo_rate',
+         'recentday', 'maflag']]
+
+df1=pd.DataFrame()
+for i in range(1,13):
+    df_month = df.query('order_month==@i') # 选择所有月则，df_month = df_ord
+    weight=entropyWeight(df_month[['sale_amt','stock_wide','sale_freq', 'fugou_rate', 'tuihuo_rate','recentday', 'maflag']])
+    
+    df_month['recentday']=dataDirection_1(df_month['recentday'])
+    df_month['tuihuo_rate']=dataDirection_1(df_month['tuihuo_rate'],offset=0.05)
+    
+    Result, Z = topsis(df_month[['sale_amt','stock_wide','sale_freq', 'fugou_rate', 'tuihuo_rate','recentday', 'maflag']],
+                       weight=weight)
+    df_month=df_month.merge(Result['综合得分指数'],left_index=True,right_index=True,how='left')
+    
+    df1=df1.append(df_month[['CustomerID', 'Country','order_month', '综合得分指数']])
+    
+df1.to_csv('Merge_test/out_customerlabelvalue_0217.csv',encoding='utf-8_sig') ##输出样本
+
+
+#用户价值描述统计及说明
+import seaborn as sns
+import matplotlib.pyplot as plt
+import pandas as pd
+import numpy as np
+
+
+df = pd.read_csv('Merge_test/out_customerlabelvalue_0217.csv')
+
+sns.set_style('white',{'font.sans-serif':['SimHei','Arial']})
+fig=sns.boxenplot(y='综合得分指数',data=df,x='order_month') #,whis=3)
+fig.set_xticklabels( ['2010-12','2011-01','2011-02','2011-03'
+                      ,'2011-04','2011-05','2011-06','2011-07'
+                      ,'2011-08','2011-09','2011-10','2011-11']) # ,fontsize=18)
+plt.tick_params(labelsize=30)
+plt.xlabel('时间' ,fontsize=25)
+plt.ylabel('用户价值' ,fontsize=25)
+plt.show()
+
+
+temp = df.groupby('CustomerID').count()
+idlist=temp[temp['order_month']==12].index
+df2=df[df['CustomerID'].isin(idlist[14:18])]
+sns.lineplot(x='order_month', y="综合得分指数", hue='CustomerID',data=df2)#,palette=pal)
+plt.show()
+
+
+df3=df[df['CustomerID'].isin([13777,16422,17450,15738,13694,14646])]
+act=df3['CustomerID'].unique().tolist()
+pal=sns.color_palette('deep',len(act))
+#sns.set_style('whitegrid')
+linestyle_tuple = [
+('loosely dotted', (0, (1, 10))),
+('dotted', (0, (1, 1))),
+('densely dotted', (0, (1, 2))),
+('loosely dashed', (0, (5, 10))),
+('dashed', (0, (5, 5))),
+('densely dashed', (0, (5, 1))),
+('loosely dashdotted', (0, (3, 10, 1, 10))),
+('dashdotted', (0, (3, 5, 1, 5))),
+('densely dashdotted', (0, (3, 1, 1, 1))),
+('dashdotdotted', (0, (3, 5, 1, 5, 1, 5))),
+('loosely dashdotdotted', (0, (3, 10, 1, 10, 1, 10))),
+('densely dashdotdotted', (0, (3, 1, 1, 1, 1, 1)))]
+
+sns.set_style('white',{'font.sans-serif':['SimHei','Arial']})
+fig=sns.pointplot(x='order_month', y="综合得分指数", hue='CustomerID',
+                 style='CustomerID',
+                 dodge = True,   # 设置点是否分开
+                 join = True,    # 是否连线
+                 linestyles=[
+                 (0, (1, 10)),(0, (1, 1)),(0, (1, 2)),(0, (5, 10)),
+                 (0, (3, 1, 1, 1, 1, 1)),(0, (5, 1))],
+                 markers=['v', '>', '8', 's', 'p', '*'],
+                 markersize=100,
+                 data=df3,palette=pal)
+fig.set_xticks(range(1,13))
+fig.set_xticklabels( ['2010-12','2011-01','2011-02','2011-03'
+                      ,'2011-04','2011-05','2011-06','2011-07'
+                      ,'2011-08','2011-09','2011-10','2011-11']) 
+plt.tick_params(labelsize=25)
+plt.xlabel('时间' ,fontsize=25)
+plt.ylabel('用户价值' ,fontsize=25)
+
+plt.setp(fig.get_legend().get_texts(), fontsize='25') # for legend text
+plt.setp(fig.get_legend().get_title(), fontsize='25') # for legend title
+plt.show()   
+   

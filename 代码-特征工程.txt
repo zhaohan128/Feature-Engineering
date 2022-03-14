@@ -1,0 +1,1055 @@
+-- 创建表
+create table ecommercedata(
+InvoiceNo longtext,
+StockCode varchar(20),
+Description longtext,
+Quantity int,
+InvoiceDate datetime,
+UnitPrice decimal(6, 3),
+CustomerID int,
+Country longtext
+);
+-- 导入数据
+show global variables like 'local_infile' ;
+set global local_infile=true;
+show variables like 'sql_mode';
+set sql_mode='';
+-- show global variables like '%secure%' 看存储和导入路径
+load data infile '/private/tmp/ecommercedata2.csv' into table ecommercedata
+fields terminated by ','
+OPTIONALLY ENCLOSED BY '"' 
+LINES TERMINATED BY '\n';
+
+select  *
+  ,date_format(InvoiceDate,'%Y-%m') as mon
+  ,max(InvoiceDate) over (partition by StockCode,date_format(InvoiceDate,'%Y-%m')) as fin_deal
+from  ecommerce_data
+limit 100;
+
+-- 商品特征
+select  
+  t1.CustomerID,
+        date_format(t1.InvoiceDate,'%Y-%m')
+  ,lag(t2.InvoiceDate,1) over (order by t2.InvoiceDate) as last_deal
+from  
+ ( -- 交易日期
+  select *
+    ,date_format(date_sub(InvoiceDate,interval 1 month),'%Y-%m') as last_mon
+        from ecommerce_data
+    ) as t1
+join
+ ( -- 上个月
+  select  *
+    ,date_format(InvoiceDate,'%Y-%m') as mon
+                -- 本月最后一次交易
+                ,max(InvoiceDate) over (partition by CustomerID,date_format(InvoiceDate,'%Y-%m')) as fin_deal
+                ,avg(abs(Quantity)*UnitPrice) over (partition by CustomerID,date_format(InvoiceDate,'%Y-%m')) as money_month
+                ,max(abs(Quantity)*UnitPrice) over (partition by CustomerID,InvoiceNo) as max_consume_order
+                ,max(abs(Quantity)*UnitPrice) over (partition by CustomerID,date_format(InvoiceDate,'%Y-%m')) as max_consume_order_month
+                ,min(abs(Quantity)*UnitPrice) over (partition by CustomerID) as min_consume_order
+                ,min(abs(Quantity)*UnitPrice) over (partition by CustomerID,date_format(InvoiceDate,'%Y-%m')) as min_consume_order_month
+        from  ecommerce_data
+ ) as t2
+    on  t1.CustomerID=t2.CustomerID
+-- where  t1.InvoiceDate>='2011-01-01 00:00:00' -- 从2011-01开始
+where date_format(t2.InvoiceDate,'%Y-%m')<date_format(t1.InvoiceDate,'%Y-%m')
+-- and  t2.InvoiceNo like 'C%'
+-- and  t1.CustomerID=12347
+group by t1.CustomerID,
+  date_format(t1.InvoiceDate,'%Y-%m');
+  
+-- 用户特征
+with group_table as 
+(
+select  CustomerID,
+  Country,
+  InvoiceNo,
+        InvoiceDate,
+        count(*)
+from  ecommerce_data
+group by 
+  CustomerID,
+        Country,
+        InvoiceNo,
+        InvoiceDate
+),
+last_deal as 
+(
+select  CustomerID,
+  Country,
+  InvoiceNo,
+        InvoiceDate,
+        lag(InvoiceDate,1) over (partition by CustomerID,Country order by InvoiceDate) as last_deal
+from group_table
+),
+now_deal as 
+(
+select CustomerID,
+  Country,
+  InvoiceNo,
+        StockCode,
+        InvoiceDate,
+        Quantity,
+        UnitPrice
+  ,date_format(date_sub(InvoiceDate,interval 1 month),'%Y-%m') as last_mon
+from ecommerce_data
+),
+before_deal as 
+(
+select  CustomerID,
+  Country,
+  InvoiceNo,
+  StockCode,
+  InvoiceDate,
+  Quantity,
+  UnitPrice
+  ,date_format(InvoiceDate,'%Y-%m') as mon
+  ,date_format(InvoiceDate,'%H:%i') as dealtime
+  -- 本月最后一次交易
+  ,max(InvoiceDate) over (partition by CustomerID,date_format(InvoiceDate,'%Y-%m')) as fin_deal
+  -- 月消费金额
+  ,sum(abs(Quantity)*UnitPrice) over (partition by CustomerID,date_format(InvoiceDate,'%Y-%m')) as consume_month
+  -- 最高消费金额_订单维度
+  ,max(abs(Quantity)*UnitPrice) over (partition by CustomerID,Country,InvoiceNo) as max_consume_order
+  -- 最低消费金额_订单维度
+  ,min(abs(Quantity)*UnitPrice) over (partition by CustomerID,Country,InvoiceNo) as min_consume_order
+from  ecommerce_data
+)
+
+-- 最高月消费金额
+select  t1.CustomerID as `顾客ID`
+  ,t1.Country as `国家`
+  ,date_format(t1.InvoiceDate,'%Y-%m') as `交易日期`
+        ,max(case when date_format(t2.InvoiceDate,'%Y-%m')<date_format(t1.InvoiceDate,'%Y-%m') then t2.consume_month else 0 end) as `截止到上个月的最高月消费金额`
+        ,min(case when date_format(t2.InvoiceDate,'%Y-%m')<date_format(t1.InvoiceDate,'%Y-%m') and t2.consume_month>0 then t2.consume_month else null end) as `截止到上个月的最低月消费金额`
+        ,avg(case when t1.last_mon=t2.mon then t2.frequency else null end) as `上个月交易频率`
+        ,avg(case when date_format(t2.InvoiceDate,'%Y-%m')<date_format(t1.InvoiceDate,'%Y-%m') then t2.frequency else null end) as `截止到上个月的交易频率` 
+from  now_deal as t1
+left join 
+ (
+    select  before_deal.*,
+   unix_timestamp(before_deal.InvoiceDate)-unix_timestamp(last_deal.last_deal) as frequency
+ from before_deal
+ left join last_deal
+ on before_deal.CustomerID=last_deal.CustomerID and before_deal.Country=last_deal.Country and before_deal.InvoiceNo=last_deal.InvoiceNo and before_deal.InvoiceDate=last_deal.InvoiceDate
+    )  as t2
+    on  t1.CustomerID=t2.CustomerID
+-- where date_format(t2.InvoiceDate,'%Y-%m')<date_format(t1.InvoiceDate,'%Y-%m')
+-- and  t1.InvoiceDate>='2011-01-01 00:00:00' -- 从2011-01开始
+group by 
+  t1.CustomerID
+        ,t1.Country
+        ,date_format(t1.InvoiceDate,'%Y-%m');
+        
+        
+-- 全特征    
+select  t1.CustomerID as `顾客ID`
+  ,t1.Country as `国家`
+  ,date_format(t1.InvoiceDate,'%Y-%m') as `交易日期`
+        ,avg(case when date_format(t2.InvoiceDate,'%Y-%m')<date_format(t1.InvoiceDate,'%Y-%m') then abs(t2.Quantity)*t2.UnitPrice else null end) as `截止到上个月的平均消费金额`
+        ,avg(case when date_format(t2.InvoiceDate,'%Y-%m')<date_format(t1.InvoiceDate,'%Y-%m') and t2.InvoiceNo like 'C%' then abs(t2.Quantity)*t2.UnitPrice else null end) as `截止到上个月的平均退货金额`
+        ,max(case when date_format(t2.InvoiceDate,'%Y-%m')<date_format(t1.InvoiceDate,'%Y-%m') then t2.consume_month else 0 end) as `截止到上个月的最高月消费金额`
+        ,min(case when date_format(t2.InvoiceDate,'%Y-%m')<date_format(t1.InvoiceDate,'%Y-%m') and t2.consume_month>0 then t2.consume_month else 0 end) as `截止到上个月的最低月消费金额`
+        ,avg(case when date_format(t2.InvoiceDate,'%Y-%m')<date_format(t1.InvoiceDate,'%Y-%m') then t2.max_consume_order else null end) as `截止到上个月的最高每单消费金额`
+        ,avg(case when date_format(t2.InvoiceDate,'%Y-%m')<date_format(t1.InvoiceDate,'%Y-%m') then t2.min_consume_order else null end) as `截止到上个月的最低每单消费金额`
+        ,avg(case when t1.last_mon=t2.mon then t2.frequency else null end) as `上个月交易频率`
+        ,avg(case when date_format(t2.InvoiceDate,'%Y-%m')<date_format(t1.InvoiceDate,'%Y-%m') then t2.frequency else null end) as `截止到上个月的交易频率`
+        ,count(distinct case when t1.last_mon=t2.mon and t2.dealtime between '00:00' and '08:00' then t2.InvoiceNo else null end) as `上个月0-8点的交易次数`
+        ,avg(case when t1.last_mon=t2.mon and t2.dealtime between '00:00' and '08:00' then abs(t2.Quantity)*t2.UnitPrice else null end) as `上个月0-8点的交易金额`
+        ,avg(case when t1.last_mon=t2.mon and t2.dealtime between '00:00' and '08:00' then abs(t2.Quantity) else null end) as `上个月0-8点的交易件数`
+        ,count(distinct case when t1.last_mon=t2.mon and t2.dealtime between '09:00' and '18:00' then t2.InvoiceNo else null end) as `上个月9-18点的交易次数`
+        ,avg(case when t1.last_mon=t2.mon and t2.dealtime between '09:00' and '18:00' then abs(t2.Quantity)*t2.UnitPrice else null end) as `上个月9-18点的交易金额`
+        ,avg(case when t1.last_mon=t2.mon and t2.dealtime between '09:00' and '18:00' then abs(t2.Quantity) else null end) as `上个月9-18点的交易件数`
+        ,count(distinct case when t1.last_mon=t2.mon and t2.dealtime between '19:00' and '23:00' then t2.InvoiceNo else null end) as `上个月19-23点的交易次数`
+        ,avg(case when t1.last_mon=t2.mon and t2.dealtime between '19:00' and '23:00' then abs(t2.Quantity)*t2.UnitPrice else null end) as `上个月19-23点的交易金额`
+        ,avg(case when t1.last_mon=t2.mon and t2.dealtime between '19:00' and '23:00' then abs(t2.Quantity) else null end) as `上个月19-23点的交易件数`
+        ,count(distinct case when date_format(t2.InvoiceDate,'%Y-%m')<date_format(t1.InvoiceDate,'%Y-%m') and t2.dealtime between '00:00' and '08:00' then t2.InvoiceNo else null end) as `截止到上个月0-8点的交易次数`
+        ,avg(case when date_format(t2.InvoiceDate,'%Y-%m')<date_format(t1.InvoiceDate,'%Y-%m') and t2.dealtime between '00:00' and '08:00' then abs(t2.Quantity)*t2.UnitPrice else null end) as `截止到上个月0-8点的交易金额`
+        ,avg(case when date_format(t2.InvoiceDate,'%Y-%m')<date_format(t1.InvoiceDate,'%Y-%m') and t2.dealtime between '00:00' and '08:00' then abs(t2.Quantity) else null end) as `截止到上个月0-8点的交易件数`
+        ,count(distinct case when date_format(t2.InvoiceDate,'%Y-%m')<date_format(t1.InvoiceDate,'%Y-%m') and t2.dealtime between '09:00' and '18:00' then t2.InvoiceNo else null end) as `截止到上个月9-18点的交易次数`
+        ,avg(case when date_format(t2.InvoiceDate,'%Y-%m')<date_format(t1.InvoiceDate,'%Y-%m') and t2.dealtime between '09:00' and '18:00' then abs(t2.Quantity)*t2.UnitPrice else null end) as `截止到上个月9-18点的交易金额`
+        ,avg(case when date_format(t2.InvoiceDate,'%Y-%m')<date_format(t1.InvoiceDate,'%Y-%m') and t2.dealtime between '09:00' and '18:00' then abs(t2.Quantity) else null end) as `截止到上个月9-18点的交易件数`
+        ,count(distinct case when date_format(t2.InvoiceDate,'%Y-%m')<date_format(t1.InvoiceDate,'%Y-%m') and t2.dealtime between '19:00' and '23:00' then t2.InvoiceNo else null end) as `截止到上个月19-23点的交易次数`
+        ,avg(case when date_format(t2.InvoiceDate,'%Y-%m')<date_format(t1.InvoiceDate,'%Y-%m') and t2.dealtime between '19:00' and '23:00' then abs(t2.Quantity)*t2.UnitPrice else null end) as `截止到上个月19-23点的交易金额`
+        ,avg(case when date_format(t2.InvoiceDate,'%Y-%m')<date_format(t1.InvoiceDate,'%Y-%m') and t2.dealtime between '19:00' and '23:00' then abs(t2.Quantity) else null end) as `截止到上个月19-23点的交易件数`     
+from  now_deal as t1
+left join 
+ (
+    select  before_deal.*,
+   unix_timestamp(before_deal.InvoiceDate)-unix_timestamp(last_deal.last_deal) as frequency
+ from before_deal
+ left join last_deal
+ on before_deal.CustomerID=last_deal.CustomerID and before_deal.Country=last_deal.Country and before_deal.InvoiceNo=last_deal.InvoiceNo and before_deal.InvoiceDate=last_deal.InvoiceDate
+    )  as t2
+    on  t1.CustomerID=t2.CustomerID
+-- where date_format(t2.InvoiceDate,'%Y-%m')<date_format(t1.InvoiceDate,'%Y-%m')
+-- and  t1.InvoiceDate>='2011-01-01 00:00:00' -- 从2011-01开始
+group by 
+  t1.CustomerID
+        ,t1.Country
+        ,date_format(t1.InvoiceDate,'%Y-%m')
+        
+
+-- 商品特征/用户特征/用户x商品交互特征
+with ord_table as (
+select 
+	-- InvoiceNo,
+    StockCode,
+    CustomerID,
+    Country,
+	date_format(InvoiceDate,'%Y-%m') as mon,
+    date_format(date_sub(InvoiceDate,interval 1 month),'%Y-%m') as lastmon
+from sys.ecommerce_data_label
+where date_format(InvoiceDate,'%Y-%m')>='2011-01'
+group by StockCode,CustomerID,Country,mon,lastmon  -- InvoiceNo,
+),
+product_table as (
+select 
+	StockCode,
+	date_format(InvoiceDate,'%Y-%m') as mon,
+    date_format(date_add(InvoiceDate,interval 1 month),'%Y-%m') as aftermon,
+    avg(UnitPrice) as jjj,
+	sum(Quantity*UnitPrice) as sale_amt,
+    sum(Quantity) as sale_num,
+    count(distinct CustomerID) as pay_user,
+    count(distinct InvoiceNo) as ord_cnt,
+	sum(case when InvoiceNo like 'c%' then Quantity*UnitPrice else 0 end) as tuihuo_sale_amt,
+    count(distinct case when InvoiceNo like 'c%' then CustomerID else null end) as tuihuo_user_cnt,
+	count(distinct case when InvoiceNo like 'c%' then InvoiceNo else null end) as tuihuo_ord_cnt
+from sys.ecommerce_data_label
+group by StockCode, mon, aftermon
+),
+jiezhi_product_table as (
+select
+	StockCode,
+    mon,
+    aftermon,
+	1.0*sum(Quantity*UnitPrice)/mon_cnt as sale_amt,
+    1.0*sum(Quantity)/mon_cnt as sale_num,
+    1.0*count(distinct CustomerID)/mon_cnt as pay_user,
+    1.0*count(distinct InvoiceNo)/mon_cnt as ord_cnt,
+    1.0*sum(case when InvoiceNo like 'c%' then Quantity*UnitPrice else 0 end)/mon_cnt as tuihuo_sale_amt,
+    1.0*count(distinct case when InvoiceNo like 'c%' then CustomerID else null end)/mon_cnt as tuihuo_user_cnt,
+	1.0*count(distinct case when InvoiceNo like 'c%' then InvoiceNo else null end)/mon_cnt as tuihuo_ord_cnt
+from (
+select a.*,b.UnitPrice,b.Quantity,b.CustomerID,b.InvoiceNo
+from (
+select 
+	StockCode,
+	date_format(InvoiceDate,'%Y-%m') as mon,
+    date_format(date_add(InvoiceDate,interval 1 month),'%Y-%m') as aftermon,
+    month(date_add(InvoiceDate,interval 1 month)) as mon_cnt
+from sys.ecommerce_data_label
+group by StockCode, mon, aftermon, mon_cnt
+) a
+left join (
+select 
+	*,
+	date_format(InvoiceDate,'%Y-%m') as mon
+from sys.ecommerce_data_label
+) b
+on a.StockCode=b.StockCode
+where b.mon between '2010-11' and a.mon
+) a
+group by StockCode, mon, aftermon
+),
+customer_table as (
+select
+    CustomerID,
+    Country,
+    date_format(InvoiceDate,'%Y-%m') as mon,
+    date_format(date_add(InvoiceDate,interval 1 month),'%Y-%m') as aftermon,
+	sum(Quantity*UnitPrice) as sale_amt,
+    sum(case when InvoiceNo like 'c%' then Quantity*UnitPrice else 0 end) as tuihuo_sale_amt,
+    sum(Quantity) as sale_num,
+    sum(case when InvoiceNo like 'c%' then Quantity else 0 end) as tuihuo_sale_num,
+    count(distinct StockCode) as stock_wide,
+    count(distinct InvoiceNo) as ord_cnt,
+    count(distinct case when InvoiceNo like 'c%' then InvoiceNo else null end) as tuihuo_ord_cnt
+from sys.ecommerce_data_label
+group by CustomerID, Country,mon, aftermon
+),
+jiezhi_customer_table as (
+select
+	CustomerID,
+    Country,
+    mon,
+    aftermon,
+    1.0*sum(Quantity*UnitPrice)/mon_cnt as sale_amt,
+    1.0*sum(case when InvoiceNo like 'c%' then Quantity*UnitPrice else 0 end)/mon_cnt as tuihuo_sale_amt,
+    1.0*sum(Quantity)/mon_cnt as sale_num,
+    1.0*sum(case when InvoiceNo like 'c%' then Quantity else 0 end)/mon_cnt as tuihuo_sale_num,
+    1.0*count(distinct StockCode)/mon_cnt as stock_wide,
+    1.0*count(distinct InvoiceNo)/mon_cnt as ord_cnt,
+    1.0*count(distinct case when InvoiceNo like 'c%' then InvoiceNo else null end)/mon_cnt as tuihuo_ord_cnt
+from (
+select a.*,b.UnitPrice,b.Quantity,b.StockCode,b.InvoiceNo
+from (
+select 
+	CustomerID,
+    Country,
+	date_format(InvoiceDate,'%Y-%m') as mon,
+    date_format(date_add(InvoiceDate,interval 1 month),'%Y-%m') as aftermon,
+    month(date_add(InvoiceDate,interval 1 month)) as mon_cnt
+from sys.ecommerce_data_label
+group by CustomerID, Country, mon, aftermon, mon_cnt
+) a
+left join (
+select 
+	*,
+	date_format(InvoiceDate,'%Y-%m') as mon
+from sys.ecommerce_data_label
+) b
+on a.CustomerID=b.CustomerID
+and a.Country=b.Country
+where b.mon between '2010-11' and a.mon
+) a
+group by CustomerID,Country,mon,aftermon
+),
+fugou_table as (
+select
+ StockCode, mon, 
+ 1.0*sum(fugou_flag)/count(distinct CustomerID) as fugou_rate
+ from (
+select	StockCode, mon, CustomerID,
+    -- count(distinct CustomerID) as user_cnt,
+    -- sum(fugou_flag) as fugou_cnt,
+   case when count(distinct InvoiceNo)>1 then 1 else 0 end as fugou_flag
+from (
+select 
+	StockCode,
+	date_format(InvoiceDate,'%Y-%m') as mon,
+    CustomerID,
+    case when InvoiceNo not like 'c%' then InvoiceNo else null end as InvoiceNo
+    -- case when count(distinct (case when InvoiceNo not like 'c%' then InvoiceNo else null end as InvoiceNo))>1 then 1 else 0 end as fugou_flag
+from ecommerce_data
+-- where InvoiceNo not like 'c%'
+group by StockCode, mon , CustomerID,InvoiceNo
+) as a
+group by StockCode, mon,CustomerID
+) a
+group by StockCode, mon
+
+),
+jiezhi_fugourate_table as (
+-- 20220220
+with ecommerce_data_label as (
+select a.*, b.label
+from (select * from sys.ecommerce_data) a
+left join (select * from sys.ecommerce_data_label3) b
+on a.StockCode=b.StockCode
+)
+
+select
+	a.StockCode, 
+    a.mon,
+    a.label,
+    count(distinct CustomerID) as user_cnt,
+    sum(jiezhi_fugou_flag) as jiezhi_fugou_cnt,
+    1.0*sum(jiezhi_fugou_flag)/count(distinct CustomerID) as jiezhi_fugou_rate
+from (
+select	
+	a.StockCode, 
+    a.mon,
+    a.label,
+    b.CustomerID,
+    case when count(distinct b.InvoiceNo )>1 then 1 else 0 end as jiezhi_fugou_flag
+from (
+	select 
+		StockCode,
+        label,
+		date_format(InvoiceDate,'%Y-%m') as mon
+	from ecommerce_data_label
+	group by StockCode, label, mon
+) a
+left join (
+select 
+	StockCode,
+	date_format(InvoiceDate,'%Y-%m') as mon,
+    CustomerID,
+    case when InvoiceNo not like 'c%' then InvoiceNo else null end as InvoiceNo
+from ecommerce_data_label
+-- where InvoiceNo not like 'c%'
+) as b
+on a.StockCode=b.StockCode
+where b.mon between '2010-11' and a.mon
+group by a.StockCode, a.mon,a.label,b.CustomerID
+) a 
+group by a.StockCode, a.mon,a.label
+),
+fugou_day_table as ( -- 截止到本月平均复购天数
+select 
+	a.StockCode,
+    a.mon,
+    max(dayrecent) as dayrecent,
+    coalesce(avg(daysdiff),365) as daysdiff 
+from (
+	select 
+		StockCode,
+		date_format(InvoiceDate,'%Y-%m') as mon
+	from sys.ecommerce_data_label
+	group by StockCode, mon
+) a
+join (
+	select 
+		StockCode,
+		date_format(InvoiceDate,'%Y-%m') as mon,
+		-- InvoiceDate,
+        max(InvoiceDate) over (partition by StockCode order by InvoiceDate) as dayrecent,
+        lag(InvoiceDate,1) over (partition by StockCode order by InvoiceDate) as last_deal,
+		timestampdiff(DAY, lag(InvoiceDate,1) over (partition by StockCode order by InvoiceDate), InvoiceDate) as daysdiff
+	from sys.ecommerce_data_label
+	group by StockCode, mon
+) b
+on a.StockCode=b.StockCode
+where b.mon between '2010-11' and a.mon
+group by a.StockCode, a.mon
+),
+customer_product_fugou_day_table as ( -- 截止到本月平均复购天数&最新下单时间
+select
+	StockCode,
+	CustomerID,
+	Country,
+    mon,
+    max(dayrecent) as dayrecent,
+    coalesce(avg(daysdiff),365) as daysdiff -- over (partition by StockCode,CustomerID,Country) 
+from(
+	select 
+		StockCode,
+        CustomerID,
+		Country,
+		date_format(InvoiceDate,'%Y-%m') as mon,
+		InvoiceDate,
+        max(InvoiceDate) over (partition by StockCode,CustomerID,Country order by InvoiceDate) as dayrecent,
+        lag(InvoiceDate,1) over (partition by StockCode,CustomerID,Country order by InvoiceDate) as last_deal,
+		timestampdiff(DAY, lag(InvoiceDate,1) over (partition by StockCode,CustomerID,Country order by InvoiceDate), InvoiceDate) as daysdiff
+	from sys.ecommerce_data_label
+	group by StockCode, CustomerID, Country, mon, InvoiceDate
+) t
+group by StockCode, CustomerID, Country, mon
+),
+customer_product_table as (
+select 
+	StockCode,
+    CustomerID,
+    Country,
+	date_format(InvoiceDate,'%Y-%m') as mon,
+    date_format(date_add(InvoiceDate,interval 1 month),'%Y-%m') as aftermon,
+	sum(Quantity*UnitPrice) as sale_amt,
+    sum(Quantity) as sale_num,
+    count(distinct InvoiceNo) as ord_cnt,
+    sum(case when InvoiceNo like 'c%' then Quantity*UnitPrice else 0 end) as tuihuo_sale_amt,
+    sum(case when InvoiceNo like 'c%' then Quantity else 0 end) as tuihuo_sale_num,
+    count(distinct case when InvoiceNo like 'c%' then InvoiceNo else null end) as tuihuo_ord_cnt
+from sys.ecommerce_data_label
+group by StockCode, CustomerID, Country, mon, aftermon
+),
+jiezhi_customer_product_table as (
+select
+	StockCode,
+    CustomerID,
+    Country,
+    mon,
+    aftermon,
+	1.0*sum(Quantity*UnitPrice)/mon_cnt as sale_amt,
+    1.0*sum(Quantity)/mon_cnt as sale_num,
+    1.0*count(distinct InvoiceNo)/mon_cnt as ord_cnt,
+    1.0*sum(case when InvoiceNo like 'c%' then Quantity*UnitPrice else 0 end)/mon_cnt as tuihuo_sale_amt,
+    1.0*sum(case when InvoiceNo like 'c%' then Quantity else 0 end)/mon_cnt as tuihuo_sale_num,
+    1.0*count(distinct case when InvoiceNo like 'c%' then InvoiceNo else null end)/mon_cnt as tuihuo_ord_cnt
+from (
+select a.*,b.UnitPrice,b.Quantity,b.InvoiceNo
+from (
+select 
+	StockCode,
+    CustomerID,
+    Country,
+	date_format(InvoiceDate,'%Y-%m') as mon,
+    date_format(date_add(InvoiceDate,interval 1 month),'%Y-%m') as aftermon,
+    month(date_add(InvoiceDate,interval 1 month)) as mon_cnt
+from sys.ecommerce_data_label
+group by StockCode, CustomerID, Country, mon, aftermon, mon_cnt
+) a
+left join (
+select 
+	*,
+	date_format(InvoiceDate,'%Y-%m') as mon
+from sys.ecommerce_data_label
+) b
+on a.StockCode=b.StockCode
+and a.CustomerID=b.CustomerID
+and a.Country=b.Country
+where b.mon between '2010-11' and a.mon
+) a
+group by StockCode, CustomerID, Country, mon, aftermon
+),
+product_feature_table as (
+select 
+	a.StockCode,
+	a.mon,
+    a.aftermon,
+	a.sale_amt,
+    a.sale_num,
+    a.pay_user,
+    a.ord_cnt,
+    a.tuihuo_sale_amt,
+	a.tuihuo_user_cnt,
+	a.tuihuo_ord_cnt,    
+    1.0*a.sale_amt/a.pay_user as arpu,
+    1.0*a.ord_cnt/a.pay_user as aordpu,
+    1.0*b.fugou_cnt/a.pay_user as fugou_rate,
+   -- c.fugou_days,
+	d.sale_amt as jiezhi_sale_amt,
+    d.sale_num as jiezhi_sale_num,
+    d.pay_user as jiezhi_pay_user,
+    d.ord_cnt as jiezhi_ord_cnt,
+    d.tuihuo_sale_amt as jiezhi_tuihuo_sale_amt,
+	d.tuihuo_user_cnt as jiezhi_tuihuo_user_cnt,
+	d.tuihuo_ord_cnt as jiezhi_tuihuo_ord_cnt,
+    1.0*d.sale_amt/d.pay_user as jiezhi_arpu,
+    1.0*d.ord_cnt/d.pay_user as jiezhi_aordpu
+from product_table a
+left join fugou_table b
+on a.StockCode=b.StockCode
+and a.mon=b.mon
+-- left join fugou_day_table c
+-- on a.StockCode=c.StockCode
+-- and a.mon=c.mon
+left join jiezhi_product_table d
+on a.mon=d.mon
+and a.StockCode=d.StockCode
+),
+customer_feature_table as (
+select 
+	a.CustomerID,
+    a.Country,
+  --  a.country_flag,
+    a.mon,
+    a.aftermon,
+	a.sale_amt,
+    a.tuihuo_sale_amt,
+    a.sale_num,
+    a.tuihuo_sale_num,
+    a.stock_wide,
+    a.ord_cnt,
+    a.tuihuo_ord_cnt,
+	d.sale_amt as jiezhi_sale_amt,
+    d.tuihuo_sale_amt as jiezhi_tuihuo_sale_amt,
+    d.sale_num as jiezhi_sale_num,
+    d.tuihuo_sale_num as jiezhi_tuihuo_sale_num,
+    d.stock_wide as jiezhi_stock_wide,
+    d.ord_cnt as jiezhi_ord_cnt,
+    d.tuihuo_ord_cnt as jiezhi_tuihuo_ord_cnt
+from customer_table a
+left join jiezhi_customer_table d
+on a.CustomerID=d.CustomerID
+and a.Country=d.Country
+and a.mon=d.mon
+),
+customer_product_feature_table as (
+select 
+	a.StockCode,
+    a.CustomerID,
+    a.Country,
+	a.mon,
+    a.aftermon,
+    a.sale_amt,
+    a.sale_num,
+    a.ord_cnt,
+    a.tuihuo_sale_amt,
+    a.tuihuo_sale_num,
+    a.tuihuo_ord_cnt,
+	d.sale_amt as jiezhi_sale_amt,
+    d.sale_num as jiezhi_sale_num,
+    d.ord_cnt as jiezhi_ord_cnt,
+    d.tuihuo_sale_amt as jiezhi_tuihuo_sale_amt,
+    d.tuihuo_sale_num as jiezhi_tuihuo_sale_num,
+    d.tuihuo_ord_cnt as jiezhi_tuihuo_ord_cnt
+from customer_product_table a
+left join jiezhi_customer_product_table d
+on a.CustomerID=d.CustomerID
+and a.Country=d.Country
+and a.mon=d.mon
+and a.StockCode=d.StockCode
+)
+
+
+select 
+	a.StockCode,
+    a.CustomerID,
+    a.Country,
+    case when a.Country like '%Poland%'
+			or a.Country like '%Lithuania%'
+            or a.Country like '%Channel Islands%'
+            or a.Country like '%Lebanon%'
+            or a.Country like '%United Arab Emirates%'
+            or a.Country like '%Saudi Arabia%'
+            or a.Country like '%Unspecified%'
+            or a.Country like '%Brazil%'
+            or a.Country like '%European Community%'
+            or a.Country like '%Bahrai%'
+            or a.Country like '%RSA%'
+	then 0 else 1 end as `用户特征_是否发达国家`,
+    a.mon as `下单月份`,
+    a.lastmon as `上月份`,
+    
+	-- 商品特征
+ 	coalesce(b.sale_amt,0) as `商品特征_上月销售额`,
+    coalesce(b.sale_num,0) as `商品特征_上月销售件数`,
+    coalesce(b.pay_user,0) as `商品特征_上月购买用户数`,
+    coalesce(b.ord_cnt,0) as `商品特征_上月订单数`,
+    coalesce(b.tuihuo_sale_amt,0) as `商品特征_上月退货金额`,
+	coalesce(b.tuihuo_user_cnt,0) as `商品特征_上月退货顾客数`,
+	coalesce(b.tuihuo_ord_cnt,  0) as `商品特征_上月退货订单数`,
+    coalesce(b.arpu,0) as `商品特征_上月人均消费`,
+    coalesce(b.aordpu,0) as `商品特征_上月人均订单数`,
+    coalesce(b.fugou_rate,0) as `商品特征_上月复购率`,
+   -- coalesce(b.fugou_days,365) as `商品特征_截止上月平均复购天数`,
+ 	coalesce(b.jiezhi_sale_amt,0) as `商品特征_截止上月月均销售额`,
+    coalesce(b.jiezhi_sale_num,0) as `商品特征_截止上月月均销售件数`,
+    coalesce(b.jiezhi_pay_user,0) as `商品特征_截止上月月均购买用户数`,
+    coalesce(b.jiezhi_ord_cnt,0) as `商品特征_截止上月月均订单数`,
+    coalesce(b.jiezhi_tuihuo_sale_amt,0) as `商品特征_截止上月月均退货金额`,
+	coalesce(b.jiezhi_tuihuo_user_cnt,0) as `商品特征_截止上月月均退货顾客数`,
+	coalesce(b.jiezhi_tuihuo_ord_cnt,  0) as `商品特征_截止上月月均退货订单数`,
+    coalesce(b.jiezhi_arpu,0) as `商品特征_截止上月月均人均消费`,
+    coalesce(b.jiezhi_aordpu,0) as `商品特征_截止上月月均人均订单数`,
+    
+    -- 用户特征
+    coalesce(c.sale_amt,0) as `用户特征_上月消费金额`,
+    coalesce(c.tuihuo_sale_amt,0) as `用户特征_上月退货金额`,
+    coalesce(c.sale_num,0) as `用户特征_上月消费件数`,
+    coalesce(c.tuihuo_sale_num,0) as `用户特征_上月退货件数`,
+    coalesce(c.stock_wide,0) as `用户特征_上月购买商品宽度`,
+    coalesce(c.ord_cnt,0) as `用户特征_上月订单数`,
+    coalesce(c.tuihuo_ord_cnt,0) as `用户特征_上月退货订单数`,
+    coalesce(c.jiezhi_sale_amt,0) as `用户特征_截止上月月均消费金额`,
+    coalesce(c.jiezhi_tuihuo_sale_amt,0) as `用户特征_截止上月月均退货金额`,
+    coalesce(c.jiezhi_sale_num,0) as `用户特征_截止上月月均消费件数`,
+    coalesce(c.jiezhi_tuihuo_sale_num,0) as `用户特征_截止上月月均退货件数`,
+    coalesce(c.jiezhi_stock_wide,0) as `用户特征_截止上月月均购买商品宽度`,
+    coalesce(c.jiezhi_ord_cnt,0) as `用户特征_截止上月月均订单数`,
+    coalesce(c.jiezhi_tuihuo_ord_cnt,0) as `用户特征_截止上月月均退货订单数`,
+    
+    -- 用户x商品交互特征
+    coalesce(d.sale_amt,0) as `用户x商品交互特征_上月销售额`,
+    coalesce(d.sale_num,0) as `用户x商品交互特征_上月销售件数`,
+    coalesce(d.ord_cnt,0) as `用户x商品交互特征_上月订单数`,
+    coalesce(d.tuihuo_sale_amt,0) as `用户x商品交互特征_上月退货金额`,
+    coalesce(d.tuihuo_sale_num,0) as `用户x商品交互特征_上月退货件数`,
+    coalesce(d.tuihuo_ord_cnt,0) as `用户x商品交互特征_上月退货订单数`,
+	coalesce(d.jiezhi_sale_amt,0) as `用户x商品交互特征_截止上月月均销售额`,
+    coalesce(d.jiezhi_sale_num,0) as `用户x商品交互特征_截止上月月均销售件数`,
+    coalesce(d.jiezhi_ord_cnt,0) as `用户x商品交互特征_截止上月月均订单数`,
+    coalesce(d.jiezhi_tuihuo_sale_amt,0) as `用户x商品交互特征_截止上月月均退货金额`,
+    coalesce(d.jiezhi_tuihuo_sale_num,0) as `用户x商品交互特征_截止上月月均退货件数`,
+    coalesce(d.jiezhi_tuihuo_ord_cnt,0) as `用户x商品交互特征_截止上月月均退货订单数`,
+    coalesce(e.dayrecent,0) as `用户x商品交互特征_上次交易时间`,
+    coalesce(e.daysdiff,365) as `用户x商品交互特征_平均复购天数`    
+    
+from (select * from ord_table) a
+left join (select * from product_feature_table) b
+on a.lastmon=b.mon
+and a.StockCode=b.StockCode
+left join (select * from customer_feature_table) c
+on a.lastmon=c.mon
+and a.CustomerID=c.CustomerID
+and a.Country=c.Country
+left join (select * from customer_product_feature_table) d
+on a.lastmon=d.mon
+and a.CustomerID=d.CustomerID
+and a.Country=d.Country
+and a.StockCode=d.StockCode
+left join (select * from customer_product_fugou_day_table) e
+on a.lastmon=e.mon
+and a.CustomerID=e.CustomerID
+and a.Country=e.Country
+and a.StockCode=e.StockCode
+;
+
+
+-- 导入商品分类   
+CREATE TABLE `sys`.`ecommerce_data_label3` (
+  `StockCode` LONGTEXT NULL,
+  `label` INT NULL);
+ 
+ -- 导入数据
+load data infile 'C:/ProgramData/MySQL/MySQL Server 8.0/Uploads/private/tmp/ecommercedata-label3.csv' 
+into table sys.ecommerce_data_label3
+fields terminated by ','
+OPTIONALLY ENCLOSED BY '"' 
+LINES TERMINATED BY '\n';
+
+-- 20220209
+with ecommerce_data_label as (
+select a.*, b.label
+from (select * from sys.ecommerce_data) a
+left join (select * from sys.ecommerce_data_label3) b
+on a.StockCode=b.StockCode
+)
+
+select 
+	-- InvoiceNo,
+    -- StockCode,
+    -- CustomerID,
+    -- Country,
+    label,
+	date_format(InvoiceDate,'%Y-%m') as mon,
+    date_format(date_sub(InvoiceDate,interval 1 month),'%Y-%m') as lastmon
+from ecommerce_data_label
+group by label,CustomerID,Country,mon,lastmon; -- StockCode
+-- productclass 1956 rows
+-- customer_productclass 255819 rows 256031
+;
+
+-- 商品类特征
+with ecommerce_data_label as (
+select a.*, b.label
+from (select * from sys.ecommerce_data) a
+left join (select * from sys.ecommerce_data_label3) b
+on a.StockCode=b.StockCode
+),
+productclass_table as (
+select 
+	label,
+	date_format(InvoiceDate,'%Y-%m') as mon,
+    date_format(date_add(InvoiceDate,interval 1 month),'%Y-%m') as aftermon,
+    sum(Quantity*UnitPrice) as sale_amt,
+    sum(Quantity) as sale_num,
+    count(distinct CustomerID) as pay_user,
+    count(distinct InvoiceNo) as ord_cnt,
+	-1.0*sum(case when InvoiceNo like 'c%' then Quantity*UnitPrice else 0 end) as tuihuo_sale_amt,
+    1.0*count(distinct case when InvoiceNo like 'c%' then CustomerID else null end) as tuihuo_user_cnt,
+	1.0*count(distinct case when InvoiceNo like 'c%' then InvoiceNo else null end) as tuihuo_ord_cnt
+from ecommerce_data_label
+group by label, mon, aftermon
+),
+jiezhi_productclass_table as (
+select
+	label,
+    mon,
+    aftermon,
+	1.0*sum(Quantity*UnitPrice) as sale_amt,
+    1.0*sum(Quantity) as sale_num,
+    1.0*count(distinct CustomerID) as pay_user,
+    1.0*count(distinct InvoiceNo) as ord_cnt,
+    -1.0*sum(case when InvoiceNo like 'c%' then Quantity*UnitPrice else 0 end) as tuihuo_sale_amt,
+    1.0*count(distinct case when InvoiceNo like 'c%' then CustomerID else null end) as tuihuo_user_cnt,
+	1.0*count(distinct case when InvoiceNo like 'c%' then InvoiceNo else null end) as tuihuo_ord_cnt
+from (
+select a.*,b.UnitPrice,b.Quantity,b.CustomerID,b.InvoiceNo
+from (
+select 
+	label,
+	date_format(InvoiceDate,'%Y-%m') as mon,
+    date_format(date_add(InvoiceDate,interval 1 month),'%Y-%m') as aftermon,
+    month(date_add(InvoiceDate,interval 1 month)) as mon_cnt
+from ecommerce_data_label
+group by label, mon, aftermon, mon_cnt
+) a
+left join (
+select 
+	*,
+	date_format(InvoiceDate,'%Y-%m') as mon
+from ecommerce_data_label
+) b
+on a.label=b.label
+where b.mon between '2010-11' and a.mon
+) a
+group by label, mon, aftermon
+),
+fugouclass_table as (
+select	label, mon, sum(fugou_flag) as fugou_cnt
+from (
+select 
+	label,
+	date_format(InvoiceDate,'%Y-%m') as mon,
+    CustomerID,
+    case when count(distinct InvoiceNo)>1 then 1 else 0 end as fugou_flag
+from ecommerce_data_label
+group by label, mon, CustomerID
+) as a
+group by label, mon
+),
+fugouclass_day_table as ( -- 截止到本月平均复购天数
+select 
+	a.label,
+    a.mon,
+    max(dayrecent) as dayrecent,
+    coalesce(avg(daysdiff),365) as daysdiff 
+from (
+	select 
+		label,
+		date_format(InvoiceDate,'%Y-%m') as mon
+	from ecommerce_data_label
+	group by label, mon
+) a
+join (
+	select 
+		label,
+		date_format(InvoiceDate,'%Y-%m') as mon,
+		-- InvoiceDate,
+        max(InvoiceDate) over (partition by label order by InvoiceDate) as dayrecent,
+        lag(InvoiceDate,1) over (partition by label order by InvoiceDate) as last_deal,
+		timestampdiff(DAY, lag(InvoiceDate,1) over (partition by label order by InvoiceDate), InvoiceDate) as daysdiff
+	from ecommerce_data_label
+	group by label, mon
+) b
+on a.label=b.label
+where b.mon between '2010-11' and a.mon
+group by a.label, a.mon
+),
+productclass_feature_table as (
+select 
+	a.label,
+	a.mon,
+    a.aftermon,
+	a.sale_amt,
+    a.sale_num,
+    a.pay_user,
+    a.ord_cnt,
+    a.tuihuo_sale_amt,
+	a.tuihuo_user_cnt,
+	a.tuihuo_ord_cnt,    
+    1.0*a.sale_amt/a.pay_user as arpu,
+    1.0*a.ord_cnt/a.pay_user as aordpu,
+    1.0*b.fugou_cnt/a.pay_user as fugou_rate,
+    c.dayrecent,
+    c.daysdiff,
+	d.sale_amt as jiezhi_sale_amt,
+    d.sale_num as jiezhi_sale_num,
+    d.pay_user as jiezhi_pay_user,
+    d.ord_cnt as jiezhi_ord_cnt,
+    d.tuihuo_sale_amt as jiezhi_tuihuo_sale_amt,
+	d.tuihuo_user_cnt as jiezhi_tuihuo_user_cnt,
+	d.tuihuo_ord_cnt as jiezhi_tuihuo_ord_cnt,
+    1.0*d.sale_amt/d.pay_user as jiezhi_arpu,
+    1.0*d.ord_cnt/d.pay_user as jiezhi_aordpu
+from productclass_table a
+left join fugouclass_table b
+on a.label=b.label
+and a.mon=b.mon
+left join fugouclass_day_table c
+on a.label=c.label
+and a.mon=c.mon
+left join jiezhi_productclass_table d
+on a.mon=d.mon
+and a.label=d.label
+)
+
+
+select 
+	b.label,
+    b.mon as `特征日期`,
+    b.aftermon as `交易日期`,
+    -- 商品类特征
+ 	coalesce(b.sale_amt,0) as `商品类特征_上月销售额`,
+    coalesce(b.sale_num,0) as `商品类特征_上月销售件数`,
+    coalesce(b.pay_user,0) as `商品类特征_上月购买用户数`,
+    coalesce(b.ord_cnt,0) as `商品类特征_上月订单数`,
+    coalesce(b.tuihuo_sale_amt,0) as `商品类特征_上月退货金额`,
+	coalesce(b.tuihuo_user_cnt,0) as `商品类特征_上月退货顾客数`,
+	coalesce(b.tuihuo_ord_cnt,  0) as `商品类特征_上月退货订单数`,
+    coalesce(b.arpu,0) as `商品类特征_上月人均消费`,
+    coalesce(b.aordpu,0) as `商品类特征_上月人均订单数`,
+    coalesce(b.fugou_rate,0) as `商品类特征_上月复购率`,
+    coalesce(b.daysdiff,365) as `商品类特征_上月平均复购天数`,
+ 	coalesce(b.jiezhi_sale_amt,0) as `商品类特征_截止上月销售额`,
+    coalesce(b.jiezhi_sale_num,0) as `商品类特征_截止上月销售件数`,
+    coalesce(b.jiezhi_pay_user,0) as `商品类特征_截止上月购买用户数`,
+    coalesce(b.jiezhi_ord_cnt,0) as `商品类特征_截止上月订单数`,
+    coalesce(b.jiezhi_tuihuo_sale_amt,0) as `商品类特征_截止上月退货金额`,
+	coalesce(b.jiezhi_tuihuo_user_cnt,0) as `商品类特征_截止上月退货顾客数`,
+	coalesce(b.jiezhi_tuihuo_ord_cnt,  0) as `商品类特征_截止上月退货订单数`,
+    coalesce(b.jiezhi_arpu,0) as `商品类特征_截止上月月均人均消费`,
+    coalesce(b.jiezhi_aordpu,0) as `商品类特征_截止上月月均人均订单数`
+from (select * from productclass_feature_table) b
+;
+
+
+-- 用户x商品类交互特征
+with ecommerce_data_label as (
+select a.*, b.label
+from (select * from sys.ecommerce_data) a
+left join (select * from sys.ecommerce_data_label3) b
+on a.StockCode=b.StockCode
+),
+customer_productclass_table as (
+select 
+	label,
+    CustomerID,
+    Country,
+	date_format(InvoiceDate,'%Y-%m') as mon,
+    date_format(date_add(InvoiceDate,interval 1 month),'%Y-%m') as aftermon,
+	sum(Quantity*UnitPrice) as sale_amt,
+    sum(Quantity) as sale_num,
+    count(distinct InvoiceNo) as ord_cnt,
+    -1.0*sum(case when InvoiceNo like 'c%' then Quantity*UnitPrice else 0 end) as tuihuo_sale_amt,
+    -1.0*sum(case when InvoiceNo like 'c%' then Quantity else 0 end) as tuihuo_sale_num,
+    count(distinct case when InvoiceNo like 'c%' then InvoiceNo else null end) as tuihuo_ord_cnt
+from ecommerce_data_label
+group by label, CustomerID, Country, mon, aftermon
+),
+jiezhi_customer_productclass_table as (
+select
+	label,
+    CustomerID,
+    Country,
+    mon,
+    aftermon,
+	1.0*sum(Quantity*UnitPrice) as sale_amt,
+    1.0*sum(Quantity) as sale_num,
+    1.0*count(distinct InvoiceNo) as ord_cnt,
+    -1.0*sum(case when InvoiceNo like 'c%' then Quantity*UnitPrice else 0 end) as tuihuo_sale_amt,
+    -1.0*sum(case when InvoiceNo like 'c%' then Quantity else 0 end) as tuihuo_sale_num,
+    1.0*count(distinct case when InvoiceNo like 'c%' then InvoiceNo else null end) as tuihuo_ord_cnt
+from (
+select a.*,b.UnitPrice,b.Quantity,b.InvoiceNo
+from (
+select 
+	label,
+    CustomerID,
+    Country,
+	date_format(InvoiceDate,'%Y-%m') as mon,
+    date_format(date_add(InvoiceDate,interval 1 month),'%Y-%m') as aftermon,
+    month(date_add(InvoiceDate,interval 1 month)) as mon_cnt
+from ecommerce_data_label
+group by label, CustomerID, Country, mon, aftermon, mon_cnt
+) a
+left join (
+select 
+	*,
+	date_format(InvoiceDate,'%Y-%m') as mon
+from ecommerce_data_label
+) b
+on a.label=b.label
+and a.CustomerID=b.CustomerID
+and a.Country=b.Country
+where b.mon between '2010-11' and a.mon
+) a
+group by label, CustomerID, Country, mon, aftermon
+),
+customer_productclass_fugou_day_table as ( -- 截止到本月平均复购天数&最新下单时间
+select
+	label,
+	CustomerID,
+	Country,
+    mon,
+    max(dayrecent) as dayrecent,
+    coalesce(avg(daysdiff),365) as daysdiff -- over (partition by Label,CustomerID,Country) 
+from(
+	select 
+		label,
+        CustomerID,
+		Country,
+		date_format(InvoiceDate,'%Y-%m') as mon,
+		InvoiceDate,
+        max(InvoiceDate) over (partition by label,CustomerID,Country order by InvoiceDate) as dayrecent,
+        lag(InvoiceDate,1) over (partition by label,CustomerID,Country order by InvoiceDate) as last_deal,
+		timestampdiff(DAY, lag(InvoiceDate,1) over (partition by label,CustomerID,Country order by InvoiceDate), InvoiceDate) as daysdiff
+	from ecommerce_data_label
+	group by label, CustomerID, Country, mon, InvoiceDate
+) t
+group by label, CustomerID, Country, mon
+),
+customer_productclass_feature_table as (
+select 
+	a.label,
+    a.CustomerID,
+    a.Country,
+	a.mon,
+    a.aftermon,
+    a.sale_amt,
+    a.sale_num,
+    a.ord_cnt,
+    a.tuihuo_sale_amt,
+    a.tuihuo_sale_num,
+    a.tuihuo_ord_cnt,
+	d.sale_amt as jiezhi_sale_amt,
+    d.sale_num as jiezhi_sale_num,
+    d.ord_cnt as jiezhi_ord_cnt,
+    d.tuihuo_sale_amt as jiezhi_tuihuo_sale_amt,
+    d.tuihuo_sale_num as jiezhi_tuihuo_sale_num,
+    d.tuihuo_ord_cnt as jiezhi_tuihuo_ord_cnt,
+    c.dayrecent,
+    c.daysdiff
+from customer_productclass_table a
+left join jiezhi_customer_productclass_table d
+on a.CustomerID=d.CustomerID
+and a.Country=d.Country
+and a.mon=d.mon
+and a.label=d.label
+left join customer_productclass_fugou_day_table c
+on a.CustomerID=c.CustomerID
+and a.Country=c.Country
+and a.mon=c.mon
+and a.label=c.label
+)
+
+select 
+	d.label,
+    d.CustomerID,
+    d.Country,
+    d.mon as `特征日期`,
+    d.aftermon as `交易日期`,
+    -- 用户x商品类交互特征
+    coalesce(d.sale_amt,0) as `用户x商品类交互特征_上月销售额`,
+    coalesce(d.sale_num,0) as `用户x商品类交互特征_上月销售件数`,
+    coalesce(d.ord_cnt,0) as `用户x商品类交互特征_上月订单数`,
+    coalesce(d.tuihuo_sale_amt,0) as `用户x商品类交互特征_上月退货金额`,
+    coalesce(d.tuihuo_sale_num,0) as `用户x商品类交互特征_上月退货件数`,
+    coalesce(d.tuihuo_ord_cnt,0) as `用户x商品类交互特征_上月退货订单数`,
+	coalesce(d.jiezhi_sale_amt,0) as `用户x商品类交互特征_截止上月销售额`,
+    coalesce(d.jiezhi_sale_num,0) as `用户x商品类交互特征_截止上月销售件数`,
+    coalesce(d.jiezhi_ord_cnt,0) as `用户x商品类交互特征_截止上月订单数`,
+    coalesce(d.jiezhi_tuihuo_sale_amt,0) as `用户x商品类交互特征_截止上月退货金额`,
+    coalesce(d.jiezhi_tuihuo_sale_num,0) as `用户x商品类交互特征_截止上月退货件数`,
+    coalesce(d.jiezhi_tuihuo_ord_cnt,0) as `用户x商品类交互特征_截止上月退货订单数`,
+    coalesce(d.dayrecent,0) as `用户x商品类交互特征_上次交易时间`,
+    coalesce(d.daysdiff,365) as `用户x商品类交互特征_平均复购天数`
+from (select * from customer_productclass_feature_table) d
+;
+
+-- customer label
+select
+	CustomerID,
+    Country,
+    mon,
+    aftermon,
+    mon_cnt,
+    max(recentday) as recentday,
+    1.0*sum(Quantity*UnitPrice) as sale_amt,
+    sum(case when bmon=mon then Quantity*UnitPrice else 0 end) as sale_amt_ma1,
+    1.0*sum(case when bmon>ma3mon then Quantity*UnitPrice else 0 end)/3 as sale_amt_ma3,
+    1.0*count(distinct StockCode) as stock_wide,
+    count(distinct fugou_stock) as fugou_stock_wide,
+    1.0*count(distinct InvoiceNo) as ord_cnt,
+    1.0*count(distinct case when InvoiceNo like 'c%' then InvoiceNo else null end) as tuihuo_ord_cnt
+from (
+select a.*,
+	b.UnitPrice,b.Quantity,b.StockCode,b.InvoiceNo,b.mon as bmon,
+    max(InvoiceDate) over (partition by CustomerID,Country,mon) as recentday,
+    case when count(case when InvoiceNo not like 'c%' then InvoiceNo else null end) over (partition by CustomerID,Country,mon,StockCode) >= 2 then StockCode else null end as fugou_stock
+from (
+select 
+	CustomerID,
+    Country,
+	date_format(InvoiceDate,'%Y-%m') as mon,
+    date_format(date_sub(InvoiceDate,interval 3 month),'%Y-%m') as ma3mon,
+    date_format(date_add(InvoiceDate,interval 1 month),'%Y-%m') as aftermon,
+    month(date_add(InvoiceDate,interval 1 month)) as mon_cnt
+from sys.ecommerce_data
+group by CustomerID, Country, mon, aftermon, mon_cnt
+) a
+left join (
+select 
+	*,
+	date_format(InvoiceDate,'%Y-%m') as mon
+from sys.ecommerce_data
+) b
+on a.CustomerID=b.CustomerID
+and a.Country=b.Country
+where b.mon between '2010-11' and a.mon
+) a
+group by CustomerID,Country,mon,aftermon
+;

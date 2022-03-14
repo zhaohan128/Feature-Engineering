@@ -1,0 +1,98 @@
+# -*- coding: utf-8 -*-
+"""
+Created on Sun Jan 23 19:49:53 2022
+
+@author: 19105
+"""
+
+import numpy as np
+import pandas as pd
+from pandas import *
+
+
+cols = ['InvoiceNo','StockCode','Description','Quantity',
+        'InvoiceDate','UnitPrice','CustomerID','Country']
+
+
+df = pd.read_csv('data_3/ecommercedata-old.csv')
+
+grouped_InvoiceNo = df.groupby(df['InvoiceNo'])
+grouped_StockCode = df.groupby(df['StockCode'])
+grouped_CustomerID = df.groupby(df['CustomerID'])
+grouped_Country = df.groupby(df['Country'])
+grouped_Description = df.groupby(df['Description'])
+grouped_Description['Quantity'].sum()
+bb=grouped_Description['InvoiceNo'].count()
+bb.max()
+
+grouped = df.groupby(df['Description'],df['CustomerID'])
+
+grouped['Quantity'].sum()
+bb=grouped['InvoiceNo'].count()
+bb.max()
+
+
+#词云图
+from wordcloud import WordCloud
+import matplotlib.pyplot as plt
+​
+text = open('ciyun.txt',encoding='utf8').read()
+text = text.replace('\n','LIGHT').replace('\u3000','')
+
+my_cloud = WordCloud(
+    background_color='white',  # 设置背景颜色  默认是black
+    width=900, height=600,
+    max_words=100,            # 词云显示的最大词语数量
+    #font_path='simhei.ttf',   # 设置字体  显示中文
+    max_font_size=99,         # 设置字体最大值
+    min_font_size=16,         # 设置子图最小值
+    random_state=50           # 设置随机生成状态，即多少种配色方案
+).generate(text)
+
+# 显示生成的词云图片
+plt.imshow(my_cloud, interpolation='bilinear')
+# 显示设置词云图中无坐标轴
+plt.axis('off')
+plt.show()
+
+
+#顾客所在国家分布图
+import pandas as pd
+from pyecharts import options as opts
+from pyecharts.charts import Map
+from pyecharts.commons.utils import JsCode
+
+df_ord = pd.read_csv('Merge_test/ecommercedata-old.csv',parse_dates=['InvoiceDate'])
+df= df_ord[['CustomerID','Country']].drop_duplicates(subset=['CustomerID','Country'])
+temp = df.groupby('Country').count()
+temp = temp[['CustomerID']]
+
+map0 = Map(init_opts=opts.InitOpts(width='800px',height='400px'))  # 图表大小
+    # 添加数据系列名称, 数据(list格式), 地图名称, 不显示小红点
+map0.add('',[list(z) for z in zip(temp.index, temp['CustomerID'])], 'world',is_map_symbol_show=False) 
+map0.set_series_opts(label_opts=opts.LabelOpts(is_show=False)) # 标签不显示(国家名称不显示)
+map0.set_global_opts(
+        title_opts=opts.TitleOpts(title=''),   #订单数据热图 主标题与副标题名称
+        visualmap_opts=opts.VisualMapOpts(is_piecewise=True, # 设置为分段
+                                          pieces=[
+                                                  {'max':4000,'min':100,'label':'>=100','color':'indigo'},
+                                                  {'max':99,'min':25,'label':'25-99','color':'purple'},
+                                                  {'max':24,'min':10,'label':'10-24','color':'slateblue'},
+                                                  {'max':9,'min':5,'label':'5-9','color':'steelblue'},
+                                                  {'max':4,'min':0,'label':'<4','color':'lightblue'},
+                                      ])
+    )   
+map0.render(path='世界地图热图.html')
+
+
+label_opts=opts.LabelOpts(is_show=True,
+                          formatter=JsCode('''function(params){
+                            if (params['value']){return params['name'] + ':' + params['value']}
+                            else{return ''}
+                            }'''))             
+                              
+df2 = df_ord[['Description']].drop_duplicates(subset=['Description'])                
+                              
+                              
+                              
+                              
